@@ -1,2 +1,2 @@
-[runner]
-pythonVersion = "3.11"
+# Streamlit runtime options may be added here.
+# Python versions are configured with runtime.txt, not config.toml.

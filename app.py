@@ -2,6 +2,7 @@ import os
 import re
 import json
 from dataclasses import dataclass
+from datetime import date
 from typing import Dict, List
 from urllib.parse import quote_plus
 
@@ -13,13 +14,160 @@ import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
 
+st.set_page_config(
+    page_title="Restaurant Prospecting Agent",
+    page_icon="🍽️",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
 load_dotenv(override=True)
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY", "").strip()
+
+def load_secret(name: str) -> str:
+    """Load local environment values first, then Streamlit Cloud secrets."""
+    value = os.getenv(name, "").strip()
+    if value:
+        return value
+    try:
+        return str(st.secrets.get(name, "")).strip()
+    except (FileNotFoundError, KeyError):
+        return ""
+
+
+OPENAI_API_KEY = load_secret("OPENAI_API_KEY")
+GOOGLE_MAPS_API_KEY = load_secret("GOOGLE_MAPS_API_KEY")
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
+
+def inject_custom_css():
+    st.markdown("""
+    <style>
+    :root { --navy:#182230; --charcoal:#344054; --muted:#667085; --border:#E4E7EC; --red:#E52B2F; }
+    .stApp { background:#F5F7FA; color:var(--charcoal); }
+    .block-container { max-width:1500px; padding:2rem 2.25rem 3rem; }
+    h1,h2,h3 { color:var(--navy); letter-spacing:-.02em; }
+    p, label, [data-testid="stCaptionContainer"] { color:var(--muted); }
+    [data-testid="stHeader"] { background:transparent; }
+    .app-header { display:flex; align-items:center; gap:22px; background:#fff; border:1px solid var(--border); border-radius:14px; padding:20px 24px; box-shadow:0 1px 3px rgba(16,24,40,.05); margin-bottom:18px; }
+    .app-header img { width:118px; height:auto; display:block; }
+    .header-divider { width:1px; height:58px; background:var(--border); }
+    .header-title { font-size:34px; line-height:1.1; font-weight:750; color:var(--navy); }
+    .header-subtitle { font-size:15px; margin-top:6px; color:var(--charcoal); }
+    .header-kicker { font-size:12px; margin-top:4px; color:var(--muted); }
+    .section-card,.results-card,.detail-card,.overview-card { background:#fff; border:1px solid var(--border); border-radius:14px; padding:22px 24px; box-shadow:0 1px 3px rgba(16,24,40,.04); }
+    .section-card { margin:8px 0 18px; }
+    .card-title { color:var(--navy); font-size:20px; font-weight:700; margin-bottom:4px; }
+    .card-description { color:var(--muted); font-size:14px; margin-bottom:14px; }
+    .info-callout { background:#EEF2F6; border:1px solid #D8DEE7; border-radius:10px; padding:15px 16px; color:var(--charcoal); font-size:13px; line-height:1.55; }
+    .metric-card { min-height:116px; background:#fff; border:1px solid var(--border); border-radius:12px; padding:16px 18px; box-shadow:0 1px 2px rgba(16,24,40,.03); }
+    .metric-label,.detail-label { color:var(--muted); font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+    .metric-value { color:var(--navy); font-size:25px; font-weight:750; margin:5px 0 2px; overflow-wrap:anywhere; }
+    .metric-description,.detail-description { color:#98A2B3; font-size:12px; }
+    .detail-row { padding:10px 0; border-bottom:1px solid #F0F2F5; }
+    .detail-row:last-child { border-bottom:0; }
+    .detail-value { color:var(--navy); font-size:14px; font-weight:550; margin-top:3px; overflow-wrap:anywhere; }
+    .detail-value a { color:#175CD3; text-decoration:none; }
+    .footer-note { color:#98A2B3; font-size:12px; margin:14px 2px; }
+    .stButton>button[kind="primary"], .stDownloadButton>button { border-radius:9px; min-height:42px; font-weight:650; }
+    .stButton>button[kind="primary"] { background:var(--red); border-color:var(--red); }
+    .stButton>button[kind="primary"]:hover { background:#C92025; border-color:#C92025; }
+    .stTextInput input,.stSelectbox>div>div,.stNumberInput input { border-radius:9px; border-color:#D0D5DD; min-height:42px; }
+    .stTabs [data-baseweb="tab-list"] { gap:26px; border-bottom:1px solid var(--border); }
+    .stTabs [data-baseweb="tab"] { color:var(--charcoal); font-weight:600; padding:12px 4px; }
+    .stTabs [aria-selected="true"] { color:var(--red) !important; }
+    .stTabs [data-baseweb="tab-highlight"] { background:var(--red); }
+    [data-testid="stDataFrame"] { border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+    @media(max-width:720px){ .block-container{padding:1rem}.app-header{align-items:flex-start;flex-direction:column;gap:10px}.header-divider{width:100%;height:1px}.header-title{font-size:28px}.metric-card{min-height:auto} }
+    </style>
+    """, unsafe_allow_html=True)
+
+
+def format_display_value(value, fallback="Not found"):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return fallback
+    cleaned = str(value).strip()
+    return fallback if cleaned.lower() in {"", "unknown", "none", "null", "n/a", "not specified"} else cleaned
+
+
+def _currency_number(value):
+    if isinstance(value, (int, float)) and not pd.isna(value):
+        return float(value)
+    match = re.search(r"([\d,.]+)\s*([kKmM]?)", str(value or "").replace("$", ""))
+    if not match:
+        return None
+    number = float(match.group(1).replace(",", ""))
+    return number * ({"k": 1_000, "m": 1_000_000}.get(match.group(2).lower(), 1))
+
+
+def format_compact_currency(value):
+    number = _currency_number(value)
+    if number is None:
+        return "Not available"
+    if abs(number) >= 1_000_000:
+        compact = f"{number / 1_000_000:.2f}".rstrip("0").rstrip(".")
+        return f"${compact}M"
+    if abs(number) >= 1_000:
+        return f"${number / 1_000:.0f}K"
+    return f"${number:,.0f}"
+
+
+def format_revenue_range(value, suffix=""):
+    if isinstance(value, dict):
+        values = [value.get(k) for k in ("low", "high")]
+    elif isinstance(value, (list, tuple)):
+        values = list(value[:2])
+    else:
+        values = re.findall(r"\$?[\d,.]+\s*[kKmM]?", str(value or ""))[:2]
+    if len(values) < 2:
+        return format_display_value(value, "Not available")
+    return f"{format_compact_currency(values[0])} – {format_compact_currency(values[1])}{suffix}"
+
+
+def sanitize_filename_component(value):
+    return re.sub(r"[^a-z0-9]+", "_", str(value).lower()).strip("_") or "market"
+
+
+def determine_result_note(row):
+    status = str(row.get("Google Status", "")).upper()
+    opening = str(row.get("Opening Status", "")).lower()
+    timeline = str(row.get("Opening Timeline", "")).lower().strip()
+    if "CLOSED_PERMANENTLY" in status or "PERMANENTLY CLOSED" in status:
+        return "Permanently closed"
+    if "OPERATIONAL" in status:
+        return "Already operational"
+    if timeline in {"", "unknown", "not specified", "none", "n/a"}:
+        return "Timeline unclear"
+    years = [int(y) for y in re.findall(r"20\d{2}", timeline)]
+    if years and max(years) < pd.Timestamp.today().year:
+        return "Possibly outdated"
+    if any(term in opening for term in ("coming soon", "announced", "under construction", "hiring")):
+        return "Future opening"
+    if "new location" in opening:
+        return "Current lead"
+    return "Current lead"
+
+
+def prepare_opening_results_dataframe(df):
+    prepared = df.copy()
+    prepared = prepared.drop(columns=["Rank"], errors="ignore")
+    if "Opportunity Score" in prepared:
+        prepared["Opportunity Score"] = pd.to_numeric(prepared["Opportunity Score"], errors="coerce")
+        prepared = prepared.sort_values("Opportunity Score", ascending=False, na_position="last")
+    prepared = prepared.reset_index(drop=True)
+    prepared.insert(0, "Rank", range(1, len(prepared) + 1))
+    return prepared
+
+
+def render_metric_card(label, value, description=""):
+    st.markdown(f'<div class="metric-card"><div class="metric-label">{label}</div><div class="metric-value">{value}</div><div class="metric-description">{description}</div></div>', unsafe_allow_html=True)
+
+
+def render_detail_row(label, value, link=False):
+    shown = format_display_value(value)
+    body = f'<a href="{shown}" target="_blank">Open website</a>' if link and shown.startswith(("http://", "https://")) else shown
+    st.markdown(f'<div class="detail-row"><div class="detail-label">{label}</div><div class="detail-value">{body}</div></div>', unsafe_allow_html=True)
 
 
 def clean_text(text: str) -> str:
@@ -66,7 +214,7 @@ def fetch_google_news(city: str) -> List[Dict]:
     return articles[:50]
 
 
-def extract_restaurants_with_ai(articles: List[Dict]) -> List[Dict]:
+def extract_restaurants_with_ai(articles: List[Dict], progress_callback=None) -> List[Dict]:
     if not client:
         st.error("Missing OPENAI_API_KEY in .env")
         return []
@@ -74,10 +222,9 @@ def extract_restaurants_with_ai(articles: List[Dict]) -> List[Dict]:
     results = []
     seen = set()
 
-    progress = st.progress(0)
-
     for i, article in enumerate(articles[:35]):
-        progress.progress((i + 1) / 35)
+        if progress_callback:
+            progress_callback((i + 1) / max(min(len(articles), 35), 1))
 
         prompt = f"""
 You are helping a POS sales rep find restaurant prospects.
@@ -453,24 +600,17 @@ def collect_existing_business_intel(business: str, city: str) -> Dict:
     rating = place.get("rating", "Unknown")
     reviews = place.get("userRatingCount", "Unknown")
     google_status = place.get("businessStatus", "Unknown")
-    revenue = estimate_revenue_with_ai({
-    "business": name,
-    "city": city,
-    "address": address,
-    "phone": phone,
-    "website": website,
-    "rating": rating,
-    "reviews": reviews,
-    "google_status": google_status,
-    "years_open": years_opened if "years_opened" in locals() else "Unknown",
-})
-
     html = fetch_website_html(website)
     website_text = BeautifulSoup(html, "html.parser").get_text(" ") if html else ""
 
     pos = detect_pos_system(html)
     contact = extract_contact_info(html)
     years_opened = estimate_years_opened(website_text)
+    revenue = estimate_revenue_with_ai({
+        "business": name, "city": city, "address": address, "phone": phone,
+        "website": website, "rating": rating, "reviews": reviews,
+        "google_status": google_status, "years_open": years_opened,
+    })
 
     news_results = fetch_google_news(f"{business} {city}")
     evidence = " ".join([
@@ -502,19 +642,21 @@ def collect_existing_business_intel(business: str, city: str) -> Dict:
     }
 
 
-def scan_new_openings(city: str) -> pd.DataFrame:
+def scan_new_openings(city: str, progress_callback=None) -> pd.DataFrame:
     articles = fetch_google_news(city)
-    st.write(f"Found {len(articles)} opening-related articles.")
+    if progress_callback:
+        progress_callback(.18, "Extracting possible restaurant prospects")
 
-    candidates = extract_restaurants_with_ai(articles)
-    st.write(f"Extracted {len(candidates)} possible restaurant prospects.")
+    candidates = extract_restaurants_with_ai(
+        articles,
+        lambda value: progress_callback(.18 + value * .42, "Extracting possible restaurant prospects") if progress_callback else None,
+    )
 
     rows = []
 
-    progress = st.progress(0)
-
     for i, candidate in enumerate(candidates):
-        progress.progress((i + 1) / max(len(candidates), 1))
+        if progress_callback:
+            progress_callback(.60 + ((i + 1) / max(len(candidates), 1)) * .32, "Verifying locations and business details")
 
         name = candidate["name"]
         place = google_places_lookup(name, city)
@@ -541,82 +683,174 @@ def scan_new_openings(city: str) -> pd.DataFrame:
     if not df.empty:
         df = df.sort_values("Opportunity Score", ascending=False)
 
+    df.attrs["articles_reviewed"] = len(articles)
+
     return df
 
 
 def main():
-    st.set_page_config(page_title="Restaurant Prospecting Agent", layout="wide")
+    inject_custom_css()
+    for key, default in {
+        "opening_results": None, "opening_market": "", "opening_articles": 0,
+        "existing_results": None, "existing_query": "",
+    }.items():
+        if key not in st.session_state:
+            st.session_state[key] = default
 
-    col1, col2 = st.columns([1, 5])
-
-    with col1:
-        st.image("integsolu logo.png", width=120)
-
-    with col2:
-        st.title("Restaurant Prospecting Agent")
-        st.caption("Built for Integrity Solutions")
-
-    with st.sidebar:
-        st.header("Setup")
-
-        if OPENAI_API_KEY:
-            st.success("OpenAI key loaded")
-        else:
-            st.error("Missing OpenAI key")
-
-        if GOOGLE_MAPS_API_KEY:
-            st.success("Google Maps key loaded")
-        else:
-            st.warning("Missing Google Maps key")
+    with st.container(border=True):
+        logo_col, title_col = st.columns([1, 7], vertical_alignment="center")
+        with logo_col:
+            st.image("integsolu logo.png", width=120)
+        with title_col:
+            st.markdown('<div class="header-title">Restaurant Prospecting Agent</div><div class="header-subtitle">Restaurant sales intelligence and new-opening discovery</div><div class="header-kicker">Built for Integrity Solutions</div>', unsafe_allow_html=True)
 
     tab1, tab2 = st.tabs(["New Opening Scanner", "Existing Business Intel"])
 
     with tab1:
-        city = st.text_input("City / Market", value="Kansas City", key="opening_city")
+        with st.container(border=True):
+            st.markdown('<div class="card-title">Market Search</div><div class="card-description">Find restaurants that are opening soon or have recently announced a location in your target market.</div>', unsafe_allow_html=True)
+            search_col, info_col = st.columns([2, 1], gap="large")
+            with search_col:
+                with st.form("opening_search_form"):
+                    city = st.text_input("City / Market", value=st.session_state.opening_market or "Kansas City", key="opening_city")
+                    opening_submit = st.form_submit_button("Find Opening Prospects", type="primary")
+            with info_col:
+                st.markdown('<div class="info-callout"><strong>How it works</strong><br>We scan recent news, public announcements, business listings, and other available sources to identify new restaurant opportunities.</div>', unsafe_allow_html=True)
 
-        if st.button("Find Opening Prospects", type="primary"):
-            with st.spinner("Scanning restaurant openings..."):
-                df = scan_new_openings(city)
-
-            if df.empty:
-                st.warning("No prospects found. Try a broader city name like 'Kansas City, MO'.")
-            else:
-                st.success(f"Found {len(df)} prospects.")
-                st.dataframe(df, use_container_width=True)
-
-                st.download_button(
-                    "Download CSV",
-                    data=df.to_csv(index=False),
-                    file_name="restaurant_opening_prospects.csv",
-                    mime="text/csv",
+        if opening_submit:
+            if not city.strip():
+                st.warning("Enter a market to begin identifying restaurant opportunities.")
+            elif not OPENAI_API_KEY:
+                st.error(
+                    "Opening search is not configured. Add OPENAI_API_KEY to the "
+                    "project's .env file, then restart Streamlit."
                 )
+            else:
+                with st.status("Searching recent restaurant-opening sources", expanded=True) as status:
+                    progress = st.progress(0, text="Searching recent restaurant-opening sources")
+                    def update_progress(value, text):
+                        progress.progress(min(float(value), 1.0), text=text)
+                    try:
+                        df = scan_new_openings(city.strip(), update_progress)
+                        progress.progress(.96, text="Scoring opportunities and preparing ranked results")
+                        st.session_state.opening_results = df
+                        st.session_state.opening_market = city.strip()
+                        st.session_state.opening_articles = df.attrs.get("articles_reviewed", 0)
+                        progress.progress(1.0, text="Ranked results ready")
+                        status.update(label=f"{len(df)} restaurant prospects found and ranked.", state="complete", expanded=False)
+                    except Exception:
+                        status.update(label="The search could not be completed. Please try again.", state="error")
+                        st.session_state.opening_results = None
+
+        source_df = st.session_state.opening_results
+        if isinstance(source_df, pd.DataFrame):
+            if source_df.empty:
+                st.info("No matching restaurant prospects were found for this market. Try expanding the market name or searching a nearby city.")
+            else:
+                enriched = source_df.copy()
+                enriched["Result Note"] = enriched.apply(determine_result_note, axis=1)
+                scores = pd.to_numeric(enriched.get("Opportunity Score"), errors="coerce")
+                metric_cols = st.columns(4)
+                with metric_cols[0]: render_metric_card("Articles Reviewed", st.session_state.opening_articles, "Sources scanned")
+                with metric_cols[1]: render_metric_card("Prospects Found", len(enriched), "Possible restaurant openings")
+                with metric_cols[2]: render_metric_card("High-Priority Prospects", int((scores >= 8).sum()), "Score 8.0 or higher")
+                with metric_cols[3]: render_metric_card("Average Opportunity Score", f"{scores.mean():.1f}" if scores.notna().any() else "Not available", "Out of 10")
+
+                st.markdown("### Ranked prospects")
+                f1, f2, f3 = st.columns([1, 1, 1])
+                statuses = sorted(enriched["Opening Status"].dropna().astype(str).unique())
+                notes = sorted(enriched["Result Note"].dropna().astype(str).unique())
+                with f1: selected_status = st.multiselect("Opening status", statuses, key="opening_status_filter")
+                with f2: selected_note = st.multiselect("Result note", notes, key="result_note_filter")
+                with f3: minimum_score = st.number_input("Minimum opportunity score", 0.0, 10.0, 0.0, .5, key="minimum_score_filter")
+                filtered = enriched.copy()
+                if selected_status: filtered = filtered[filtered["Opening Status"].astype(str).isin(selected_status)]
+                if selected_note: filtered = filtered[filtered["Result Note"].isin(selected_note)]
+                filtered = filtered[pd.to_numeric(filtered["Opportunity Score"], errors="coerce").fillna(0) >= minimum_score]
+                export_df = prepare_opening_results_dataframe(filtered)
+                header_left, header_right = st.columns([4, 1])
+                header_left.success(f"{len(export_df)} restaurant prospects found and ranked.")
+                filename = f"restaurant_prospects_{sanitize_filename_component(st.session_state.opening_market)}_{date.today().isoformat()}.csv"
+                header_right.download_button("Download prospect list", export_df.to_csv(index=False).encode("utf-8"), filename, "text/csv", use_container_width=True)
+                display_columns = ["Rank", "Restaurant", "Opportunity Score", "Opening Status", "Opening Timeline", "Result Note", "Address", "Phone", "Website", "Google Status", "Rating", "Reviews", "Evidence"]
+                display_df = export_df[[c for c in display_columns if c in export_df]].copy()
+                if "Evidence" in display_df:
+                    display_df["Evidence"] = display_df["Evidence"].map(lambda x: str(x) if len(str(x)) <= 160 else str(x)[:157] + "…")
+                column_config = {
+                    "Rank": st.column_config.NumberColumn("Rank", width="small", format="%d"),
+                    "Restaurant": st.column_config.TextColumn("Restaurant", width="medium"),
+                    "Opportunity Score": st.column_config.NumberColumn("Opportunity Score", width="small", format="%.1f"),
+                    "Website": st.column_config.LinkColumn("Website", width="medium", display_text="Open website"),
+                    "Rating": st.column_config.NumberColumn("Rating", width="small", format="%.1f"),
+                    "Reviews": st.column_config.NumberColumn("Reviews", width="small", format="%d"),
+                    "Evidence": st.column_config.TextColumn("Evidence", width="large"),
+                    "Address": st.column_config.TextColumn("Address", width="large"),
+                }
+                st.dataframe(display_df, hide_index=True, use_container_width=True, height=520, column_config=column_config)
+                st.markdown('<div class="footer-note">Results are based on publicly available information and may be incomplete or subject to change.</div>', unsafe_allow_html=True)
+        else:
+            st.info("Enter a market above to begin identifying restaurant opportunities.")
 
     with tab2:
-        business = st.text_input("Business name", placeholder="Joe's Kansas City BBQ")
-        city2 = st.text_input("City / Market", value="Kansas City", key="existing_city")
-
-        if st.button("Research Existing Business", type="primary"):
-            if not business:
+        with st.container(border=True):
+            st.markdown('<div class="card-title">Business Research</div><div class="card-description">Research a restaurant’s contact information, current technology, online presence, and estimated sales opportunity.</div>', unsafe_allow_html=True)
+            with st.form("business_research_form"):
+                bcol, ccol = st.columns([3, 2])
+                with bcol: business = st.text_input("Business Name", placeholder="Joe's Kansas City BBQ")
+                with ccol: city2 = st.text_input("City / Market", value="Kansas City", key="existing_city")
+                business_submit = st.form_submit_button("Research Existing Business", type="primary")
+        if business_submit:
+            if not business.strip():
                 st.warning("Enter a business name first.")
-            else:
-                with st.spinner("Researching business..."):
-                    intel = collect_existing_business_intel(business, city2)
-
-                st.subheader(intel["Business"])
-
-                c1, c2, c3 = st.columns(3)
-                c1.metric("POS Guess", intel["Current POS Guess"])
-                c2.metric("POS Confidence", intel["POS Confidence"])
-                c3.metric("Google Rating", intel["Rating"])
-
-                st.table(pd.DataFrame(intel.items(), columns=["Field", "Finding"]))
-
-                st.download_button(
-                    "Download Business Intel JSON",
-                    data=json.dumps(intel, indent=2),
-                    file_name=f"{business.lower().replace(' ', '_')}_intel.json",
-                    mime="application/json",
+            elif not GOOGLE_MAPS_API_KEY:
+                st.error(
+                    "Business research is not configured. Add GOOGLE_MAPS_API_KEY "
+                    "to the project's .env file, then restart Streamlit."
                 )
+            else:
+                try:
+                    with st.spinner("Researching contact, technology, and business signals..."):
+                        st.session_state.existing_results = collect_existing_business_intel(business.strip(), city2.strip())
+                        st.session_state.existing_query = business.strip()
+                except Exception:
+                    st.session_state.existing_results = None
+                    st.error("We could not find enough public information for this business. Check the business name and city, then try again.")
+
+        intel = st.session_state.existing_results
+        if isinstance(intel, dict):
+            with st.container(border=True):
+                st.markdown(f'<div class="card-title">{format_display_value(intel.get("Business"), st.session_state.existing_query)}</div><div class="card-description">Business overview</div>', unsafe_allow_html=True)
+                o1, o2, o3 = st.columns(3)
+                with o1: render_detail_row("Address", intel.get("Address")); render_detail_row("Phone", intel.get("Phone"))
+                with o2: render_detail_row("Website", intel.get("Website"), link=True); render_detail_row("Google Status", intel.get("Google Status"), )
+                with o3: render_detail_row("Rating", intel.get("Rating")); render_detail_row("Review count", f'{int(intel["Reviews"]):,}' if str(intel.get("Reviews", "")).isdigit() else intel.get("Reviews"))
+            cards = st.columns(4)
+            with cards[0]: render_metric_card("Current POS Guess", format_display_value(intel.get("Current POS Guess"), "Insufficient evidence"), "Detected from public technology clues")
+            with cards[1]: render_metric_card("POS Confidence", format_display_value(intel.get("POS Confidence"), "Low"), "Confidence in technology match")
+            with cards[2]: render_metric_card("Google Rating", format_display_value(intel.get("Rating"), "Not available"), f'{format_display_value(intel.get("Reviews"), "No")} reviews')
+            with cards[3]: render_metric_card("Estimated Annual Revenue", format_revenue_range(intel.get("Estimated Annual Revenue")), f'{format_display_value(intel.get("Revenue Confidence"), "Low")} confidence')
+            st.markdown("### Research details")
+            d1, d2 = st.columns(2)
+            with d1:
+                with st.container(border=True):
+                    st.markdown("#### Contact and Location")
+                    for field in ("Address", "Phone", "Website", "Owner / Decision Maker", "Emails Found", "Website Phones Found"): render_detail_row(field, intel.get(field), link=field == "Website")
+                with st.container(border=True):
+                    st.markdown("#### Business Performance")
+                    for field in ("Rating", "Reviews", "Years Open", "Google Status"): render_detail_row(field, intel.get(field))
+            with d2:
+                with st.container(border=True):
+                    st.markdown("#### Technology Intelligence")
+                    for field in ("Current POS Guess", "POS Confidence", "POS Evidence"): render_detail_row(field, intel.get(field), )
+                with st.container(border=True):
+                    st.markdown("#### Revenue Estimate")
+                    render_detail_row("Estimated Monthly Revenue", format_revenue_range(intel.get("Estimated Monthly Revenue"), " monthly"))
+                    render_detail_row("Estimated Annual Revenue", format_revenue_range(intel.get("Estimated Annual Revenue"), " annually"))
+                    for field in ("Revenue Confidence", "Revenue Reasoning"): render_detail_row(field, intel.get(field))
+            st.download_button("Download Business Intel JSON", json.dumps(intel, indent=2), f"{sanitize_filename_component(st.session_state.existing_query)}_intel.json", "application/json")
+            st.markdown('<div class="footer-note">Results are based on publicly available information and may be incomplete or subject to change.</div>', unsafe_allow_html=True)
+        else:
+            st.info("Enter a business name and market above to begin researching an existing restaurant.")
 
 
 if __name__ == "__main__":

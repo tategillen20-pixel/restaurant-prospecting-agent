@@ -42,11 +42,15 @@ It outputs a CSV-friendly table of prospects.
 pip install -r requirements.txt
 ```
 
-4. Optional but recommended: copy `.env.example` to `.env` and add your SerpAPI key:
+4. Copy `.env.example` to `.env` and add your API keys:
 
 ```bash
-SERPAPI_KEY=your_key_here
+OPENAI_API_KEY=your_openai_api_key_here
+GOOGLE_MAPS_API_KEY=your_google_maps_api_key_here
 ```
+
+The opening scanner requires the OpenAI key. Existing Business Intel requires
+the Google Maps key. Keep `.env` private; it is excluded from Git.
 
 5. Start the app:
 
